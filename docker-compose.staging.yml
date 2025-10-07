@@ -1,0 +1,113 @@
+version: '3.8'
+
+# ================================
+# STAGING ENVIRONMENT FOR QA TESTS
+# ================================
+# This file is maintained by DevOps and lives in the QA repo.
+# It pulls prebuilt :staging images for store_service and user_service
+# from the registry, spins up their respective DBs, and runs the QA
+# test suite in a dedicated test-runner container.
+
+services:
+  # ------------------------------
+  # MySQL for store_service
+  # ------------------------------
+  store-db:
+    image: mysql:8.0
+    container_name: store-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass          # staging creds (safe for QA)
+      MYSQL_DATABASE: storedb
+      MYSQL_USER: storeuser
+      MYSQL_PASSWORD: storepass
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -prootpass --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - store_service_db:/var/lib/mysql
+
+  # ------------------------------
+  # MySQL for user_service
+  # ------------------------------
+  user-db:
+    image: mysql:8.0
+    container_name: user-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: userdb
+      MYSQL_USER: useruser
+      MYSQL_PASSWORD: userpass
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -prootpass --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - user_service_db:/var/lib/mysql
+
+  # ------------------------------
+  # user_service (staging image)
+  # ------------------------------
+  user-service:
+    image: myregistry.com/myorg/user-service:staging
+    container_name: user-service
+    env_file:
+      - .env.staging                          # staging-specific env vars
+    environment:
+      DB_HOST: user-db
+      FLASK_ENV: staging
+    depends_on:
+      user-db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"                           # optional: expose for manual QA
+
+  # ------------------------------
+  # store_service (staging image)
+  # ------------------------------
+  store-service:
+    image: myregistry.com/myorg/store-service:staging
+    container_name: store-service
+    env_file:
+      - .env.staging
+    environment:
+      DB_HOST: store-db
+      USER_SERVICE_URL: http://user-service:5000
+      FLASK_ENV: staging
+    depends_on:
+      store-db:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    ports:
+      - "8000:8000"                           # optional: expose for manual QA
+
+  # ------------------------------
+  # Test runner container
+  # ------------------------------
+  test-runner:
+    build:
+      context: .                              # QA repo root
+      dockerfile: Dockerfile                  # builds pytest runner image
+    container_name: qa-test-runner
+    depends_on:
+      store-service:
+        condition: service_started
+    environment:
+      STORE_URL: http://store-service:8000
+      USER_URL: http://user-service:5000
+    command: >
+      sh -c "pytest -q --disable-warnings --maxfail=1 --junitxml=/reports/junit.xml"
+    volumes:
+      - ./reports:/reports                    # collect test reports locally
+
+# ------------------------------
+# Named volumes for DB persistence
+# ------------------------------
+volumes:
+  store_service_db:
+  user_service_db:
